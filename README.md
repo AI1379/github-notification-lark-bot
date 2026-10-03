@@ -441,7 +441,9 @@ subscriptions:
    - 把 Verification Token 填到 `.env` 的 `FEISHU_VERIFICATION_TOKEN` —— **必填**：不填 larkbot 会直接
      503 拒绝处理回调事件，因为飞书的 token 是唯一的来源校验手段，没它任何人都能伪造“群内指令”
      （`open_id` 都能随便编）。只有本地调试才设 `feishu.allow_unverified_callbacks: true`。
-     challenge 地址校验始终应答，不受这个影响。
+   - challenge 地址校验的规则：**未配 token 时始终应答**（方便先把地址存下来）；
+     一旦配了 token 就会校验，所以如果控制台提示“校验失败”，说明 `.env` 里的 token 与控制台不一致。
+     推荐顺序：从控制台复制 token → 写进 `.env` → `systemctl restart larkbot` → 再回控制台保存请求地址。
 3. 创建版本并发布（权限/事件订阅改动都要发版才生效）
 4. config 里打开：
 
