@@ -395,7 +395,29 @@ subscriptions:
 | `poll_interval_seconds` | 轮询周期，实际会加 ±10% 抖动 |
 | `poll_overlap_seconds` | 游标回溯窗口，防止边界丢事件（重复靠去重兜住） |
 | `webhook_freshness_seconds` | `auto` 模式下判定「webhook 还健康」的时间窗 |
-| `first_poll` | `baseline`（首次只记录游标，不补推历史）/ `backlog`（补推最近 1 小时） |
+| `first_poll` | `baseline`（真正的全新仓库只记录游标，不补推 90 天历史）/ `backlog`（补推最近 1 小时） |
+| `fallback_lookback_seconds` | **webhook 断链后轮询接管时，最多向前补多久的漏掉事件**（默认 6h） |
+
+#### 什么时候会从 webhook 回退到轮询
+
+判断是**逐仓库**做的，每轮（默认 180s）问同一个问题：*这个仓库最近 `webhook_freshness_seconds`（默认 900s）内收到过 webhook 吗？*
+
+| 情况 | 会轮询吗 |
+| --- | --- |
+| 从没配 webhook（`webhook_last_seen_at` 为 NULL） | ✅ 一开始就是纯轮询 |
+| webhook 配了但隧道断了超过 15 分钟 | ✅ 下一轮自动接管 |
+| webhook 恢复正常 | ❌ 15 分钟内又开始跳过（自动交回给 webhook） |
+| `poll_mode: always` | ✅ 每轮都跑（并行双保险，不是回退） |
+| `poll_mode: never` | ❌ 永不轮询 |
+
+“webhook 还活着”是**按“收到”判断、不是按“事件有用”判断**：哪怕推来的全是没订阅的仓库，也算通道健康，不会白白轮询。
+
+**切换延迟**：webhook 在 T 时刻断，T+900s 判定过期，再等下一个周期 → **最坏约 18 分钟**（平均 ~16 分钟）。
+
+**断链期间的事件不会丢**：一直靠 webhook 的仓库，`poll_state` 里根本没有游标，如果直接走 `first_poll: baseline`
+就会把断链期间的动静全部丢掉（回退机制恰好丢掉了它最该救的那批事件）。所以轮询接管时会改用
+**“最后一次确认 webhook 活着”的时刻**作为起点补推，并用 `fallback_lookback_seconds` 封顶避免长时间断链一次刷屏。
+补推到的如果其实已经由 webhook 投递过，会被去重识别为重复（不会重推）；真正漏掉的才会补上。
 | `poll_repos` | 额外轮询的仓库。**通配订阅（`org/*`）只对「已知仓库」生效**，已知 = 收到过 webhook，或写在这里 |
 
 ### delivery：重试与保留策略
@@ -713,7 +735,8 @@ cloudflared tunnel run larkbot
   如果隧道放行了整个站点，建议用 `server.admin_token` 锁管理接口，或在 ingress 里按 path 只放行 `/webhooks/`
 - 状态库是单文件 SQLite（默认 `data/larkbot.db`），投递记录默认保留 `delivery.ttl_days`（14 天）后清理
 - **隧道断了不等于丢事件**：`poll_mode: auto` 下，超过 `webhook_freshness_seconds`（默认 900s）没收到 webhook，
-  轮询会自动接管，最多退化成分钟级延迟
+  轮询会自动接管，并把断链期间漏掉的事件补推（封顶 `fallback_lookback_seconds`，默认 6h），
+  最坏退化成 ~18 分钟延迟，而不是静默丢消息
 
 ---
 

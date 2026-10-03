@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import httpx
 import pytest
 import respx
@@ -194,6 +196,121 @@ async def test_404_marks_repo_error(store):
         await github.aclose()
     assert report.status == "error"
     assert "无权访问" in (report.error or "")
+
+
+async def _backdate_webhook_seen(store, repo: str, minutes: int) -> None:
+    """把「最后一次收到 webhook」的时间往前拨，模拟隧道此时断了。"""
+    await store.connection.execute(
+        "UPDATE repos SET webhook_last_seen_at = ? WHERE repo = ?",
+        (to_iso(utcnow() - timedelta(minutes=minutes)), repo),
+    )
+    await store.connection.commit()
+
+
+@respx.mock
+async def test_fallback_recovers_events_missed_during_webhook_outage(store):
+    """核心行为：一直靠 webhook 的仓库，隧道断后轮询接手时，必须把断链期间漏掉的补上。
+
+    回归保护：以前这里会走 first_poll=baseline 分支只记游标不投递，
+    于是回退机制恰好丢掉了它最该救的那批事件。
+    """
+    config = make_config(github={"poll_mode": "auto", "first_poll": "baseline"})
+    feishu = RecordingFeishu()
+    poller, github = await _build(config, store, feishu)
+    await store.remember_repo("acme/api", "webhook")
+    await _backdate_webhook_seen(store, "acme/api", 18)
+    try:
+        # 断链期间真实发生的 3 件事（webhook 没送到）；head 各不相同，否则会被 dedup 当成同一事件
+        respx.get(EVENTS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    api_push_event(head="aaa1", created_at=to_iso(utcnow() - timedelta(minutes=15))),
+                    api_push_event(head="bbb2", created_at=to_iso(utcnow() - timedelta(minutes=10))),
+                    api_push_event(head="ccc3", created_at=to_iso(utcnow() - timedelta(minutes=3))),
+                ],
+            )
+        )
+        report = await poller.poll_repo("acme/api")
+    finally:
+        await github.aclose()
+
+    assert report.status == "ok"
+    assert report.fetched == 3
+    assert report.delivered == 3
+    assert feishu.chats() == ["dev"] * 3
+    state = await store.poll_state("acme/api")
+    assert state is not None and state["cursor"] is not None
+
+
+@respx.mock
+async def test_fallback_does_not_duplicate_already_delivered_events(store):
+    """断链期间其实没漏（webhook 已投递）时，补课抓到的会判为重复，不会重推。"""
+    config = make_config(github={"poll_mode": "always", "first_poll": "baseline"})
+    feishu = RecordingFeishu()
+    poller, github = await _build(config, store, feishu)
+    await store.remember_repo("acme/api", "webhook")
+    await _backdate_webhook_seen(store, "acme/api", 18)
+
+    webhook_event = normalize_webhook("push", push_payload(repo="acme/api"), source="webhook")
+    assert webhook_event is not None
+    service = NotificationService(config, store, feishu, Router(config))
+    assert (await service.dispatch(webhook_event)).delivered == ["dev"]
+
+    try:
+        respx.get(EVENTS_URL).mock(return_value=httpx.Response(200, json=[api_push_event()]))
+        report = await poller.poll_repo("acme/api")
+    finally:
+        await github.aclose()
+
+    assert report.new_events == 1
+    assert report.delivered == 0
+    assert report.skipped == 1
+    assert feishu.chats() == ["dev"]  # 只有 webhook 那一次
+
+
+@respx.mock
+async def test_fallback_lookback_is_bounded(store):
+    """断链很久时不能一次刷屏：只补 fallback_lookback_seconds 内的事件。"""
+    config = make_config(github={"poll_mode": "always", "first_poll": "baseline", "fallback_lookback_seconds": 3600})
+    feishu = RecordingFeishu()
+    poller, github = await _build(config, store, feishu)
+    await store.remember_repo("acme/api", "webhook")
+    await _backdate_webhook_seen(store, "acme/api", 3 * 24 * 60)  # 3 天前断的
+    try:
+        respx.get(EVENTS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    api_push_event(head="old", created_at=to_iso(utcnow() - timedelta(days=3))),
+                    api_push_event(head="new", created_at=to_iso(utcnow() - timedelta(minutes=10))),
+                ],
+            )
+        )
+        report = await poller.poll_repo("acme/api")
+    finally:
+        await github.aclose()
+
+    assert report.fetched == 2
+    assert report.new_events == 1  # 3 天前那个被封顶挡掉
+    assert report.delivered == 1
+
+
+@respx.mock
+async def test_genuinely_new_repo_still_only_baselines(store):
+    """真的新仓库（从没见过 webhook）仍然不补历史，避免把 90 天事件倒进群里。"""
+    config = make_config(github={"poll_mode": "always", "first_poll": "baseline"})
+    feishu = RecordingFeishu()
+    poller, github = await _build(config, store, feishu)
+    try:
+        respx.get(EVENTS_URL).mock(return_value=httpx.Response(200, json=[api_push_event()]))
+        report = await poller.poll_repo("acme/api")
+    finally:
+        await github.aclose()
+
+    assert report.status == "baseline"
+    assert report.new_events == 0
+    assert feishu.sent == []
 
 
 async def test_target_repos_filters_unwatched(store):

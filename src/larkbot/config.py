@@ -91,6 +91,9 @@ class GitHubConfig(BaseModel):
     #: 首次轮询：baseline = 只记录游标不推送历史事件；backlog = 补推最近事件
     first_poll: Literal["baseline", "backlog"] = "baseline"
     first_poll_lookback_seconds: int = 3600
+    #: 「webhook 断链后被轮询接管」时最多向前补多久的漏掉事件。
+    #: 断链期间的事件如果完全不补，回退就失去意义；但不封顶的话长时间断链会刷屏。
+    fallback_lookback_seconds: int = 21600
     #: 额外轮询的仓库（从未收到 webhook、也没有具体订阅时用）
     poll_repos: list[str] = Field(default_factory=list)
 

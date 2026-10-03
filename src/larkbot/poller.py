@@ -153,24 +153,34 @@ class Poller:
     async def poll_repo(self, repo: str) -> RepoPollReport:
         cfg = self.config.github
         report = RepoPollReport(repo=repo, status="ok")
+        now = utcnow()
 
-        if cfg.poll_mode == "auto":
-            last_webhook = await self._webhook_last_seen(repo)
-            if last_webhook is not None:
-                age = (utcnow() - last_webhook).total_seconds()
-                if age < cfg.webhook_freshness_seconds:
-                    logger.debug("%s 最近 %.0fs 收到过 webhook，跳过轮询", repo, age)
-                    return RepoPollReport(repo=repo, status="skipped_webhook_fresh")
+        last_webhook = await self._webhook_last_seen(repo)
+        if cfg.poll_mode == "auto" and last_webhook is not None:
+            age = (now - last_webhook).total_seconds()
+            if age < cfg.webhook_freshness_seconds:
+                logger.debug("%s 最近 %.0fs 收到过 webhook，跳过轮询", repo, age)
+                return RepoPollReport(repo=repo, status="skipped_webhook_fresh")
 
         state = await self.store.poll_state(repo) or {}
         cursor = parse_ts(state.get("cursor"))
         etag = state.get("etag") if isinstance(state.get("etag"), str) else None
 
-        floor = (
-            cursor - timedelta(seconds=cfg.poll_overlap_seconds)
-            if cursor is not None
-            else utcnow() - timedelta(seconds=cfg.first_poll_lookback_seconds)
-        )
+        # 首次轮询（没有游标）分两种情形，回溯起点完全不同：
+        #  ① recovering：此仓库以前一直靠 webhook 投递（所以 poll_state 里没游标），
+        #     现在 webhook 不新鲜了 → 从「最后一次确认它活着」开始补。
+        #     不补的话，断链那段时间的事件会永久丢失，回退就失去了意义。
+        #  ② 真正的全新仓库 → 按 first_poll 策略（默认 baseline，不把 90 天历史倒进群里）。
+        recovering = cursor is None and last_webhook is not None
+        if cursor is not None:
+            floor = cursor - timedelta(seconds=cfg.poll_overlap_seconds)
+        elif last_webhook is not None:  # 再判一次，顺便让类型检查器收窄
+            floor = max(
+                last_webhook - timedelta(seconds=cfg.poll_overlap_seconds),
+                now - timedelta(seconds=cfg.fallback_lookback_seconds),
+            )
+        else:
+            floor = now - timedelta(seconds=cfg.first_poll_lookback_seconds)
 
         try:
             events, new_etag, not_modified = await self._fetch(repo, etag=etag, floor=floor)
@@ -188,10 +198,12 @@ class Poller:
         dated = [(when, item) for when, item in dated if item]
         newest = max((when for when, _ in dated if when), default=None)
 
-        if cursor is None and cfg.first_poll == "baseline":
+        if cursor is None and not recovering and cfg.first_poll == "baseline":
             await self.store.save_poll_state(repo, etag=new_etag, cursor=to_iso(newest), status="baseline")
             logger.info("首次轮询 %s，只记录基线游标 (%s)，不补推历史事件", repo, to_iso(newest))
             return RepoPollReport(repo=repo, status="baseline", fetched=report.fetched)
+        if recovering:
+            logger.info("%s 从 webhook 回退到轮询，补推 %s 之后的动静", repo, to_iso(floor))
 
         fresh = [(when, item) for when, item in dated if when is None or when >= floor]
         fresh.sort(key=lambda pair: pair[0] or utcnow())
