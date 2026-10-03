@@ -618,11 +618,89 @@ HTTP 接口：
 
 ## 7. 安全与部署注意
 
+### 7.1 先分清方向：需要公网入口的只有「入站」那两条
+
+| 能力 | 方向 | 需要公网入口吗 |
+| --- | --- | --- |
+| 收 GitHub 事件（webhook） | GitHub → 你 | ✅ 需要（就是这一条逼你暴露端口） |
+| 收飞书群指令 | 飞书 → 你 | ✅ 需要（不用群内指令就不用暴露） |
+| 收 GitHub 事件（轮询回退） | 你 → GitHub | ❌ 纯出站 |
+| 发飞书消息（自定义机器人 / 自建应用都是） | 你 → 飞书 | ❌ 纯出站 |
+
+所以有三种部署形态：
+
+1. **零暴露**：不要 webhook，只靠轮询 + 发送。延迟 = `poll_interval_seconds`（默认 180s）
+2. **只开 GitHub 入口**（推荐）：只暴露 `/webhooks/github`，事件秒级到达；轮询当备胎
+3. **全开**：再暴露 `/webhooks/feishu`，才能用群内指令
+
+### 7.2 用 cloudflared tunnel 把 GitHub 打进来
+
+命名隧道（URL 固定，生产用）：
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create larkbot
+cloudflared tunnel route dns larkbot larkbot.example.com
+```
+
+`~/.cloudflared/config.yml`（系统级装在 `/etc/cloudflared/config.yml`）：
+
+```yaml
+tunnel: <上一条输出的 UUID>
+credentials-file: /root/.cloudflared/<UUID>.json
+ingress:
+  # 只放行 webhook 路径，其余一律 404：/status 与 /admin/* 继续留在内网
+  - hostname: larkbot.example.com
+    path: ^/webhooks/
+    service: http://localhost:8000
+  # 需要从外面看健康检查就放开这两行
+  # - hostname: larkbot.example.com
+  #   path: ^/healthz$
+  #   service: http://localhost:8000
+  - service: http_status:404   # 必须是最后一条 catch-all
+```
+
+```bash
+cloudflared tunnel ingress validate                              # 校验配置
+cloudflared tunnel ingress rule https://larkbot.example.com/status  # 看某条 URL 命中哪条规则
+cloudflared tunnel run larkbot
+```
+
+临时调试可以用快速隧道（**URL 每次重启都变，别用于生产**）：`cloudflared tunnel --url http://localhost:8000`
+
+### 7.3 告诉 GitHub 打到哪个端点
+
+仓库（或组织）→ Settings → Webhooks → Add webhook：
+
+| 字段 | 值 |
+| --- | --- |
+| Payload URL | `https://larkbot.example.com/webhooks/github` —— **路径必须一致** |
+| Content type | `application/json` |
+| Secret | 与 `.env` 的 `GITHUB_WEBHOOK_SECRET` 完全一致（**先填 secret 再测试**） |
+| SSL verification | Enable |
+
+这个路径是代码里固定的（见 `src/larkbot/app.py` 的路由）。保存后 GitHub 会立即发一个 `ping`：
+
+| 你看到 | 含义 |
+| --- | --- |
+| `200` + `{"msg":"pong"}` | 通了 |
+| `401` | Secret 与 `GITHUB_WEBHOOK_SECRET` 不一致 |
+| `404` | 隧道 ingress 没放行这个 path，或 `larkbot serve` 没起来 |
+| 连接超时 | 隧道没跑，或 hostname 没解析到隧道 |
+
+排查入口就是该 webhook 页面的 **Recent Deliveries**：能看请求头/请求体/响应码/响应体，修好后可以 **Redeliver** 重放，不用傻等下一个事件。
+
+飞书群内指令同理，事件订阅的请求地址填 `https://larkbot.example.com/webhooks/feishu`。
+注意：飞书要求 **1 秒内**应答地址校验请求、**3 秒内**响应事件，所以别在隧道前面套需要登录的 Cloudflare Access 策略。
+
+### 7.4 其余安全项
+
 - `.env` 与 `config/config.yaml` 已在 `.gitignore` 里，别提交真实密钥
-- `/status` 与 `/` 默认公开，只暴露群名、仓库名与计数，不含 webhook 地址和 token；如需完全私有，
-  在反向代理层限制，或把 `admin_token` 配上并自行加鉴权
-- webhook 入口建议只暴露 `/webhooks/github`，其余接口留在内网
-- 状态库是单文件 SQLite（默认 `data/larkbot.db`），投递记录默认保留 14 天后清理
+- `/status` 与 `/` 默认公开，只暴露群名、仓库名与计数，不含 webhook 地址和 token（出错信息里的 webhook URL 已脱敏）。
+  如果隧道放行了整个站点，建议用 `server.admin_token` 锁管理接口，或在 ingress 里按 path 只放行 `/webhooks/`
+- 状态库是单文件 SQLite（默认 `data/larkbot.db`），投递记录默认保留 `delivery.ttl_days`（14 天）后清理
+- **隧道断了不等于丢事件**：`poll_mode: auto` 下，超过 `webhook_freshness_seconds`（默认 900s）没收到 webhook，
+  轮询会自动接管，最多退化成分钟级延迟
 
 ---
 

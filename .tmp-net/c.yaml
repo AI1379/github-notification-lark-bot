@@ -1,0 +1,4 @@
+# 最小配置：不配 webhook、不配任何群 —— 模拟"家里机器、零公网暴露"
+github: {poll_mode: always, first_poll: baseline, per_page: 20, max_pages: 1}
+chats: []
+subscriptions: []
