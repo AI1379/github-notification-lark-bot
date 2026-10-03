@@ -1,0 +1,17 @@
+# 本地配置与密钥
+.env
+config/config.yaml
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/

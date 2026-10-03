@@ -1,0 +1,141 @@
+# ---------------------------------------------------------------------------
+# larkbot 配置示例
+#
+# 用法：cp config/config.example.yaml config/config.yaml 后修改。
+# 任何字符串值都可以写成 `env:变量名`，运行时从环境变量读取（见 .env.example）。
+# ---------------------------------------------------------------------------
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  # 管理接口 /admin/* 的调用凭证；留空 = 关闭管理接口
+  admin_token: env:LARKBOT_ADMIN_TOKEN
+  # 卡片上时间展示用的时区
+  timezone: Asia/Shanghai
+
+github:
+  enabled: true
+  # 轮询用 token（可选，但建议填：提高 API 限额，且能读取私有仓库事件）
+  token: env:GITHUB_TOKEN
+  # webhook 签名校验密钥，必须与 GitHub 仓库/组织 webhook 里填的 Secret 一致
+  webhook_secret: env:GITHUB_WEBHOOK_SECRET
+
+  # —— 轮询回退策略 ——
+  # always: 每个周期都轮询（webhook 与轮询双保险，可能产生重复，但会被去重）
+  # auto  : 最近 webhook_freshness_seconds 内收到过 webhook 就跳过该仓库（推荐）
+  # never : 完全不轮询，只依赖 webhook
+  poll_mode: auto
+  poll_interval_seconds: 180
+  # 回溯窗口：从上次游标往前多看这么久，避免边界丢事件（重复的部分靠 dedup 兜住）
+  poll_overlap_seconds: 300
+  webhook_freshness_seconds: 900
+  max_pages: 2
+  per_page: 50
+  # 首次看到某仓库时：baseline = 只记录游标、不补推历史；backlog = 补推最近 1 小时
+  first_poll: baseline
+  first_poll_lookback_seconds: 3600
+  # 额外要轮询的仓库（没配 webhook、也没有具体订阅条目时使用）
+  poll_repos: []
+
+feishu:
+  base_url: https://open.feishu.cn
+  # transport: app 的群需要自建应用凭证
+  app_id: env:FEISHU_APP_ID
+  app_secret: env:FEISHU_APP_SECRET
+  request_timeout_seconds: 10
+  # 事件订阅的 Verification Token（开发者后台 → 事件与回调 → 加密策略）
+  # 只有想让群内指令（@机器人 sub ...）生效时才需要填
+  verification_token: env:FEISHU_VERIFICATION_TOKEN
+
+# ---------------------------------------------------------------------------
+# 群内指令：@机器人 sub/unsub 自助增减订阅
+# 默认关闭（enabled: false），因为开启后群主就能改本群的订阅了。
+# 指令只能增删「指令自己创建的订阅」，**永远不会修改 config.yaml 里的规则**。
+# ---------------------------------------------------------------------------
+commands:
+  enabled: false
+  # 白名单：这些 open_id 可以在任何群改订阅（用 `@我 whoami` 查自己的 open_id）
+  admins: []
+  # 允许群主管理自己群的订阅（需要 im:chat:readonly 权限）
+  allow_group_owner: true
+  # 要求消息里必须 @ 了机器人才当指令（通过敏感权限收全部群消息时建议保持 true）
+  require_mention: true
+  # 允许指令订阅的仓库范围；**留空 = 只能订阅下面 subscriptions 里已经声明过的仓库**
+  repo_allowlist: []
+  # 是否在群里回执每次变更（关掉则静默执行，仅记日志）
+  reply: true
+  # 单个群通过指令最多订阅多少个仓库，防止误操作刷屏
+  max_repos_per_chat: 50
+
+# 投递与重试策略
+delivery:
+  # 每轮最多重试多少条失败投递（失败快照存在状态库里，不依赖 GitHub）
+  retry_limit: 20
+  # 首次失败超过这么久就不再重试，避免无限重试
+  retry_max_age_minutes: 60
+  # 投递记录保留天数；去重依赖它，建议 >= poll_overlap_seconds
+  ttl_days: 14
+
+# ---------------------------------------------------------------------------
+# 推送目标：一个 chat = 一个飞书群
+#   transport: webhook -> 群自定义机器人 webhook（最省事，无需建应用）
+#   transport: app     -> 自建应用 + 群 chat_id（需要把机器人拉进群）
+# ---------------------------------------------------------------------------
+chats:
+  - name: dev-frontend
+    transport: webhook
+    webhook_url: env:FEISHU_WEBHOOK_DEV_FRONTEND
+    webhook_secret: env:FEISHU_WEBHOOK_SECRET_DEV_FRONTEND
+
+  - name: releases
+    transport: app
+    chat_id: oc_0000000000000000000000000000000
+    enabled: false # 没有应用凭证时先关掉
+
+# ---------------------------------------------------------------------------
+# 订阅默认值：单条 subscription 未指定的字段会继承这里
+# ---------------------------------------------------------------------------
+defaults:
+  # 想收哪些事件类型；支持别名 pr / issue / comment
+  # 注意：pull_request 的「评审」是另外三类独立事件，默认没收：
+  #   pull_request_review          提交评审（approved / changes_requested）
+  #   pull_request_review_comment  代码行内评论
+  #   （PR 会话区的评论是 issue_comment，和普通 Issue 评论同一个事件，无法区分）
+  events: [push, pull_request, issues, issue_comment, release]
+  # actions 控制「同一个事件类型里哪些动作要推」。**不写 = 不过滤**，即 pull_request 的所有
+  # 动作都会推：opened reopened synchronize ready_for_review converted_to_draft closed
+  # labeled unlabeled assigned review_requested edited ...
+  #
+  # 想安静点用**映射**写法（只影响 pull_request，不会误伤 issue_comment / release）：
+  # actions:
+  #   pull_request: [opened, reopened, synchronize, ready_for_review, closed, merged]
+  #
+  # 别用列表写法去收窄 PR：它作用于所有事件类型，
+  # 例如 actions: [opened, closed] 会连带把 issue_comment(created) / release(published) 悄悄丢掉。
+  ignore_actors:
+    - "*[bot]" # 支持 * ? 通配；[ ] 按字面量处理，所以能匹配 dependabot[bot]
+  ignore_labels: []
+  ignore_drafts: true # 草稿 PR 不推送
+
+# ---------------------------------------------------------------------------
+# 订阅规则：repo 支持通配（org/*），chats 引用上面定义的 chat.name
+# ---------------------------------------------------------------------------
+subscriptions:
+  # 1) 具体仓库 -> 前端群，只看主干和 release 分支
+  - repos: ["octocat/Hello-World"]
+    chats: [dev-frontend]
+    branches: [main, "release/*"]
+    note: 示例：单仓库推送
+
+  # 2) 整个组织的仓库 -> 所有群，只看 PR 和 Release
+  - repos: ["octocat/*"]
+    chats: [dev-frontend, releases]
+    events: [pull_request, release]
+    note: 示例：组织级订阅
+
+  # 3) 同一仓库的额外规则：Release 单独进发布群（即使 1) 里过滤掉了也没关系）
+  - repos: ["octocat/Hello-World"]
+    chats: [releases]
+    events: [release]
+    ignore_actors: [] # 覆盖 defaults，保留机器人发的 Release
+    note: 示例：只推 Release 到发布群

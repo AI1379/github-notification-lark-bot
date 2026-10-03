@@ -1,0 +1,3 @@
+# 统一以 LF 入库：Windows 默认 core.autocrlf=true，不锁住的话
+# 会在 Linux 与 Windows 之间产生「整文件都变了」的假 diff。
+* text=auto eol=lf
