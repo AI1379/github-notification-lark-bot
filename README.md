@@ -217,7 +217,10 @@ uv run larkbot slash                        # 查看已注册的
 cloudflared tunnel --url http://localhost:8000
 ```
 
-> 签名校验用的是 `X-Hub-Signature-256`（HMAC-SHA256，兼容 `sha1`）。secret 没配时会跳过校验并打警告，**只建议本地调试**。
+> 签名校验用的是 `X-Hub-Signature-256`（HMAC-SHA256，兼容 `sha1`）。
+> **没有配置 secret 时，webhook 入口会直接返回 `503` 拒绝所有请求**（安全默认值）——因为一个不验签的
+> 公开端点等于“任何人都能伪造 GitHub 事件往群里发消息”。本地调试如果确实不想配 secret，
+> 显式设 `github.allow_unsigned_webhooks: true`。
 
 ### 3.2 Token（轮询通道）
 
@@ -685,6 +688,7 @@ cloudflared tunnel run larkbot
 | --- | --- |
 | `200` + `{"msg":"pong"}` | 通了 |
 | `401` | Secret 与 `GITHUB_WEBHOOK_SECRET` 不一致 |
+| `503` | 服务端没配 `GITHUB_WEBHOOK_SECRET`（默认拒绝未签名请求）——先把 secret 填好再测 |
 | `404` | 隧道 ingress 没放行这个 path，或 `larkbot serve` 没起来 |
 | 连接超时 | 隧道没跑，或 hostname 没解析到隧道 |
 

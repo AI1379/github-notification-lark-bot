@@ -75,6 +75,10 @@ class GitHubConfig(BaseModel):
     enabled: bool = True
     token: str | None = None
     webhook_secret: str | None = None
+    #: 未配置 webhook_secret 时是否仍然接受 webhook。
+    #: 默认 False = 直接返回 503 拒绝（否则一旦端口可公网访问，任何人都能伪造事件
+    #: 往群里发消息）。只在本地调试、端口不可能被外部访问时才改 true。
+    allow_unsigned_webhooks: bool = False
     api_base_url: str = "https://api.github.com"
     request_timeout_seconds: float = 15.0
     #: always = 每轮都轮询（最强兜底）；auto = 最近收到过 webhook 就跳过；never = 只收 webhook
@@ -286,6 +290,7 @@ class Config(BaseModel):
             "poll_mode": self.github.poll_mode,
             "poll_interval_seconds": self.github.poll_interval_seconds,
             "webhook_signature_required": bool(self.github.webhook_secret),
+            "allow_unsigned_webhooks": self.github.allow_unsigned_webhooks,
             "github_token_configured": bool(self.github.token),
             "delivery": {
                 "retry_limit": self.delivery.retry_limit,

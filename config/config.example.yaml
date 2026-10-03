@@ -19,6 +19,10 @@ github:
   token: env:GITHUB_TOKEN
   # webhook 签名校验密钥，必须与 GitHub 仓库/组织 webhook 里填的 Secret 一致
   webhook_secret: env:GITHUB_WEBHOOK_SECRET
+  # 未配 secret 时是否仍接受 webhook：默认 false = 直接返回 503 拒绝。
+  # （没验签的端点一旦能被外部访问，任何人都能伪造事件往群里发消息）
+  # 只有本地调试、端口确定不会被外部访问时才改 true。
+  allow_unsigned_webhooks: false
 
   # —— 轮询回退策略 ——
   # always: 每个周期都轮询（webhook 与轮询双保险，可能产生重复，但会被去重）

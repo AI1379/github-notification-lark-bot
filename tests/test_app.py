@@ -130,10 +130,26 @@ def test_invalid_json_body_is_rejected(client):
     assert response.status_code == 400
 
 
-def test_unsigned_webhook_allowed_when_no_secret(tmp_path, recorder):
+def test_unsigned_webhook_rejected_by_default(tmp_path, recorder):
+    """没配 secret 时必须拒掉，否则端口一公开任何人都能伪造事件。"""
     http = httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler))
     app = create_app(
         make_config(github={"webhook_secret": None}),
+        store_path=tmp_path / "nodb.db",
+        start_poller=False,
+        http_client=http,
+    )
+    with TestClient(app) as client:
+        response = post_event(client, push_payload(), secret=None)
+        assert response.status_code == 503
+        assert "webhook_secret" in response.json()["detail"]
+        assert recorder.feishu == []  # 没有转发到飞书
+
+
+def test_unsigned_webhook_allowed_only_when_explicitly_enabled(tmp_path, recorder):
+    http = httpx.AsyncClient(transport=httpx.MockTransport(recorder.handler))
+    app = create_app(
+        make_config(github={"webhook_secret": None, "allow_unsigned_webhooks": True}),
         store_path=tmp_path / "nodb.db",
         start_poller=False,
         http_client=http,

@@ -169,8 +169,17 @@ def _router() -> APIRouter:
                 stats.webhook_rejected += 1
                 logger.warning("webhook 签名校验失败 (delivery=%s)", x_github_delivery)
                 raise HTTPException(status_code=401, detail="签名校验失败")
+        elif not bot.config.github.allow_unsigned_webhooks:
+            # 没有 secret 就不校验签名；一旦这个端口能被外部访问，等于谁都能伪造事件
+            # 往群里发消息。所以默认直接拒绝，要本地调试就显式打开 allow_unsigned_webhooks。
+            stats.webhook_rejected += 1
+            logger.error(
+                "收到未签名的 webhook，但未配置 github.webhook_secret；已拒绝。"
+                " 填好 GITHUB_WEBHOOK_SECRET，或（仅本地调试）设 github.allow_unsigned_webhooks: true"
+            )
+            raise HTTPException(status_code=503, detail="未配置 github.webhook_secret，拒绝处理未签名请求")
         else:
-            logger.warning("未配置 github.webhook_secret，webhook 不校验签名（仅建议本地调试时使用）")
+            logger.warning("allow_unsigned_webhooks=true：webhook 不校验签名（仅限本地调试）")
 
         event_name = x_github_event or "unknown"
         if event_name == "ping":

@@ -310,7 +310,16 @@ async def _check(args: argparse.Namespace) -> int:
         if chat.transport == "app" and not (config.feishu.app_id and config.feishu.app_secret):
             problems.append(f"chat {chat.name}: 使用 transport=app，但缺少 feishu.app_id/app_secret")
     if not config.github.webhook_secret:
-        problems.append("未配置 github.webhook_secret：webhook 不校验签名，仅建议本地调试")
+        if config.github.allow_unsigned_webhooks:
+            problems.append(
+                "未配置 github.webhook_secret 但 allow_unsigned_webhooks=true：webhook 不验签，"
+                "任何人都能伪造事件。仅限本地调试！"
+            )
+        else:
+            problems.append(
+                "未配置 github.webhook_secret：webhook 入口会返回 503 拒绝所有请求（这是安全默认值）；"
+                "填好 GITHUB_WEBHOOK_SECRET 后即可"
+            )
     if not config.github.enabled or config.github.poll_mode == "never":
         problems.append("轮询被关闭：webhook 一旦漏投就没有兜底")
     if not config.subscriptions:
