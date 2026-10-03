@@ -6,6 +6,10 @@ data/
 *.db-wal
 *.db-shm
 
+# 本地临时目录（写脚本做探查/验证时用）
+.tmp-*/
+.local/
+
 # Python
 __pycache__/
 *.py[cod]
