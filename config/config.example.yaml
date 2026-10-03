@@ -50,6 +50,10 @@ feishu:
   # 事件订阅的 Verification Token（开发者后台 → 事件与回调 → 加密策略）
   # 只有想让群内指令（@机器人 sub ...）生效时才需要填
   verification_token: env:FEISHU_VERIFICATION_TOKEN
+  # 未配 verification_token 时是否仍处理回调事件：默认 false = 503 拒绝。
+  # 飞书的 token 是唯一的来源校验手段，没有它别人可以伪造“群内指令”让机器人执行操作。
+  # （地址校验 challenge 不受此项影响，始终应答）仅本地调试才改 true。
+  allow_unverified_callbacks: false
 
 # ---------------------------------------------------------------------------
 # 群内指令：@机器人 sub/unsub 自助增减订阅

@@ -104,6 +104,11 @@ class FeishuConfig(BaseModel):
     request_timeout_seconds: float = 10.0
     #: 事件订阅的 Verification Token（开发者后台 → 事件与回调 → 加密策略）
     verification_token: str | None = None
+    #: 未配置 verification_token 时是否仍处理回调事件。
+    #: 默认 False = 直接 503 拒绝：飞书的 token 是唯一的来源校验手段，没有它任何人都能
+    #: 伪造一条“群内指令”消息（连 open_id 都能随便编）让机器人执行操作。
+    #: 只在本地调试时改 true。（challenge 地址校验不受此项影响，始终应答）
+    allow_unverified_callbacks: bool = False
 
 
 class CommandsConfig(BaseModel):

@@ -328,7 +328,10 @@ async def _check(args: argparse.Namespace) -> int:
         problems.append("没有任何可用（enabled 且有凭证）的 chat，消息无处可发")
     if config.commands.enabled:
         if not config.feishu.verification_token:
-            problems.append("commands.enabled=true 但缺少 feishu.verification_token，飞书回调会被拒（401）")
+            problems.append(
+                "commands.enabled=true 但缺少 feishu.verification_token：回调事件会被 503 拒绝"
+                "（没有 token 就无法确认回调来源，别人可以伪造指令）"
+            )
         if not [chat for chat in config.active_chats if chat.transport == "app"]:
             problems.append(
                 "commands.enabled=true 但没有任何 transport=app 的群；自定义机器人（webhook）是单向的，收不到指令"

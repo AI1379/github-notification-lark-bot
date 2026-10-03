@@ -266,9 +266,8 @@ def feishu_event(
     }
 
 
-@pytest.fixture
-def command_client(tmp_path, recorder):
-    """开启指令的 app，飞书群 rel 的 chat_id = oc_test_chat，群主 = OWNER_OPEN_ID。"""
+def feishu_aware_handler(recorder: Recorder, *, owner: str | None = OWNER_OPEN_ID):
+    """能应付 larkbot 所有出站请求（token / 群主 / 回复 / github 轮询）的 MockTransport handler。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         recorder.requests.append(request)
@@ -277,17 +276,24 @@ def command_client(tmp_path, recorder):
             return httpx.Response(200, json=[])
         if "tenant_access_token" in url:
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "t", "expire": 7200})
-        if "/open-apis/im/v1/chats/oc_test_chat" in url:
-            return httpx.Response(200, json={"code": 0, "data": {"chat_id": "oc_test_chat", "owner_id": OWNER_OPEN_ID}})
+        if "/open-apis/im/v1/chats/" in url:
+            chat_id = url.split("/im/v1/chats/")[1].split("?")[0]
+            return httpx.Response(200, json={"code": 0, "data": {"chat_id": chat_id, "owner_id": owner}})
         return httpx.Response(200, json={"code": 0, "msg": "success"})
 
+    return handler
+
+
+@pytest.fixture
+def command_client(tmp_path, recorder):
+    """开启指令的 app，飞书群 rel 的 chat_id = oc_test_chat，群主 = OWNER_OPEN_ID。"""
     config = make_config(
         feishu={"verification_token": VT},
         commands={"enabled": True, "allow_group_owner": True, "repo_allowlist": [], "admins": []},
         # 只有 dev 有 config 规则；rel 完全靠群内指令
         subscriptions=[{"repos": ["acme/*"], "chats": ["dev"]}],
     )
-    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    http = httpx.AsyncClient(transport=httpx.MockTransport(feishu_aware_handler(recorder)))
     app = create_app(config, store_path=tmp_path / "cmd.db", start_poller=False, http_client=http)
     with TestClient(app) as client:
         yield client
@@ -306,6 +312,61 @@ def test_challenge_with_bad_token_is_rejected(command_client):
         "/webhooks/feishu", json={"type": "url_verification", "challenge": "abc", "token": "wrong"}
     )
     assert response.status_code == 401
+
+
+def test_challenge_answered_even_without_verification_token(tmp_path, recorder):
+    """配置事件订阅的第一步还没拿到 token，地址校验必须能过。"""
+    http = httpx.AsyncClient(transport=httpx.MockTransport(feishu_aware_handler(recorder)))
+    app = create_app(
+        make_config(feishu={"verification_token": None}),
+        store_path=tmp_path / "vt.db",
+        start_poller=False,
+        http_client=http,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/feishu", json={"type": "url_verification", "challenge": "chal-1", "token": "x"}
+        )
+        assert response.status_code == 200
+        assert response.json() == {"challenge": "chal-1"}
+
+
+def test_unverified_callback_rejected_without_verification_token(tmp_path, recorder):
+    """没有 verification_token 时不能处理事件：否则任何人都能伪造群内指令。"""
+    http = httpx.AsyncClient(transport=httpx.MockTransport(feishu_aware_handler(recorder)))
+    app = create_app(
+        make_config(feishu={"verification_token": None}, commands={"enabled": True}),
+        store_path=tmp_path / "vt2.db",
+        start_poller=False,
+        http_client=http,
+    )
+    with TestClient(app) as client:
+        payload = feishu_event("@_user_1 sub acme/api")
+        payload["header"].pop("token")  # 伪造者当然不需要带真 token
+        response = client.post("/webhooks/feishu", json=payload)
+        assert response.status_code == 503
+        assert response.json()["error"] == "verification_token_not_configured"
+        # 关键：没有被当成指令执行
+        status = client.get("/status").json()
+        assert status["dynamic_subscriptions"] == []
+
+
+def test_unverified_callback_allowed_when_explicitly_enabled(tmp_path, recorder):
+    http = httpx.AsyncClient(transport=httpx.MockTransport(feishu_aware_handler(recorder)))
+    app = create_app(
+        make_config(
+            feishu={"verification_token": None, "allow_unverified_callbacks": True},
+            commands={"enabled": True},
+        ),
+        store_path=tmp_path / "vt3.db",
+        start_poller=False,
+        http_client=http,
+    )
+    with TestClient(app) as client:
+        payload = feishu_event("@_user_1 sub acme/api")
+        payload["header"].pop("token")
+        assert client.post("/webhooks/feishu", json=payload).status_code == 200
+        assert client.get("/status").json()["dynamic_subscriptions"] != []
 
 
 def test_event_with_bad_token_is_rejected(command_client):

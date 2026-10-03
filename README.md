@@ -434,7 +434,10 @@ subscriptions:
 2. 事件与回调 → **事件订阅**：订阅 `im.message.receive_v1`；请求地址填 `https://<你的域名>/webhooks/feishu`
    - 飞书会先发一个 `challenge` 校验请求，larkbot 会自动应答（要求 1 秒内返回）
    - **加密策略的 Encrypt Key 请留空**：本版本未实现 AES 解密，配了加密会收到明确的 400 报错并写日志
-   - 把 Verification Token 填到 `.env` 的 `FEISHU_VERIFICATION_TOKEN`
+   - 把 Verification Token 填到 `.env` 的 `FEISHU_VERIFICATION_TOKEN` —— **必填**：不填 larkbot 会直接
+     503 拒绝处理回调事件，因为飞书的 token 是唯一的来源校验手段，没它任何人都能伪造“群内指令”
+     （`open_id` 都能随便编）。只有本地调试才设 `feishu.allow_unverified_callbacks: true`。
+     challenge 地址校验始终应答，不受这个影响。
 3. 创建版本并发布（权限/事件订阅改动都要发版才生效）
 4. config 里打开：
 

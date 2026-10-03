@@ -198,7 +198,11 @@ class FeishuClient:
                     f"获取 tenant_access_token 失败: code={data.get('code')} msg={data.get('msg')}",
                     code=data.get("code"),
                 )
-            self._token = str(data["tenant_access_token"])
+            token = data.get("tenant_access_token")
+            if not token:
+                # 外面拿到的任何异常都不该是 KeyError，这里把非预期响应当成错误报出去
+                raise FeishuError(f"获取 tenant_access_token 的响应缺少该字段: {data}")
+            self._token = str(token)
             # 官方默认 7200s，提前 60s 过期
             self._token_expires_at = time.monotonic() + max(int(data.get("expire", 7200)) - 60, 60)
             return self._token

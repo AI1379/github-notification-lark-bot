@@ -261,8 +261,23 @@ def _router() -> APIRouter:
         try:
             payload = parse_payload(body)
             if is_challenge(payload):
+                # 地址校验始终应答：第一步配置事件订阅时还没有 token 可用
                 stats.feishu_challenges += 1
                 return JSONResponse(challenge_response(payload, token))
+            if not token and not bot.config.feishu.allow_unverified_callbacks:
+                stats.feishu_rejected += 1
+                logger.error(
+                    "收到飞书回调事件，但未配置 feishu.verification_token；已拒绝。"
+                    " 填好 FEISHU_VERIFICATION_TOKEN 后重启（仅本地调试可设"
+                    " feishu.allow_unverified_callbacks: true）"
+                )
+                return JSONResponse(
+                    {
+                        "error": "verification_token_not_configured",
+                        "detail": "未配置 feishu.verification_token，无法确认回调来源，已拒绝处理",
+                    },
+                    status_code=503,
+                )
             event_type, event_id, event = parse_event(payload, token)
         except EventError as exc:
             stats.feishu_rejected += 1
