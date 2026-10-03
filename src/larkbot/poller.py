@@ -166,20 +166,28 @@ class Poller:
         cursor = parse_ts(state.get("cursor"))
         etag = state.get("etag") if isinstance(state.get("etag"), str) else None
 
-        # 首次轮询（没有游标）分两种情形，回溯起点完全不同：
-        #  ① recovering：此仓库以前一直靠 webhook 投递（所以 poll_state 里没游标），
-        #     现在 webhook 不新鲜了 → 从「最后一次确认它活着」开始补。
-        #     不补的话，断链那段时间的事件会永久丢失，回退就失去了意义。
-        #  ② 真正的全新仓库 → 按 first_poll 策略（默认 baseline，不把 90 天历史倒进群里）。
-        recovering = cursor is None and last_webhook is not None
+        # 首次轮询（没有游标）分三种情形，回溯起点与行为完全不同：
+        #  ① 回退补课：以前靠 webhook 投递，现在接管 → 从「最后一次确认它活着」开始补
+        #     （fallback_poll=backfill；不补的话断链那段时间的事件会永久丢失）
+        #  ② 回退只打基线：fallback_poll=baseline → 只从此刻起，宁可漏推也不刷屏
+        #  ③ 真正的全新仓库 → 按 first_poll 策略（默认 baseline，不把 90 天历史倒进群里）
+        seen_webhook = last_webhook is not None
+        if cursor is not None:
+            mode = "incremental"
+        elif seen_webhook:
+            mode = "backfill" if cfg.fallback_poll == "backfill" else "baseline"
+        else:
+            mode = "backfill" if cfg.first_poll == "backlog" else "baseline"
+
         if cursor is not None:
             floor = cursor - timedelta(seconds=cfg.poll_overlap_seconds)
-        elif last_webhook is not None:  # 再判一次，顺便让类型检查器收窄
+        elif seen_webhook and mode == "backfill":
             floor = max(
                 last_webhook - timedelta(seconds=cfg.poll_overlap_seconds),
                 now - timedelta(seconds=cfg.fallback_lookback_seconds),
             )
         else:
+            # 只用于翻页判断，不会真的拿它去投递（baseline 分支会直接返回）
             floor = now - timedelta(seconds=cfg.first_poll_lookback_seconds)
 
         try:
@@ -198,11 +206,16 @@ class Poller:
         dated = [(when, item) for when, item in dated if item]
         newest = max((when for when, _ in dated if when), default=None)
 
-        if cursor is None and not recovering and cfg.first_poll == "baseline":
-            await self.store.save_poll_state(repo, etag=new_etag, cursor=to_iso(newest), status="baseline")
-            logger.info("首次轮询 %s，只记录基线游标 (%s)，不补推历史事件", repo, to_iso(newest))
+        if mode == "baseline":
+            # cursor 用「抓到的最新事件时间」或 now 兑底，确保下次进来就不是首次了
+            await self.store.save_poll_state(repo, etag=new_etag, cursor=to_iso(newest or now), status="baseline")
+            logger.info(
+                "首次轮询 %s（%s），只记录基线游标，不补推历史事件",
+                repo,
+                "回退策略=baseline" if seen_webhook else "新仓库",
+            )
             return RepoPollReport(repo=repo, status="baseline", fetched=report.fetched)
-        if recovering:
+        if seen_webhook:
             logger.info("%s 从 webhook 回退到轮询，补推 %s 之后的动静", repo, to_iso(floor))
 
         fresh = [(when, item) for when, item in dated if when is None or when >= floor]

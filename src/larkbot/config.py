@@ -94,6 +94,10 @@ class GitHubConfig(BaseModel):
     #: 「webhook 断链后被轮询接管」时最多向前补多久的漏掉事件。
     #: 断链期间的事件如果完全不补，回退就失去意义；但不封顶的话长时间断链会刷屏。
     fallback_lookback_seconds: int = 21600
+    #: 回退接管时怎么处理断链期间的事件：
+    #:   backfill = 补推（靠去重排除已送达的，宁可补多不少；长时间断链可能一次推很多）
+    #:   baseline = 只从此刻起，不补历史（宁可漏推，绝不刷屏）
+    fallback_poll: Literal["backfill", "baseline"] = "backfill"
     #: 额外轮询的仓库（从未收到 webhook、也没有具体订阅时用）
     poll_repos: list[str] = Field(default_factory=list)
 

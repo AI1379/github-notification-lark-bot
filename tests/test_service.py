@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
+
 from larkbot.fixtures import push_payload, release_payload
 from larkbot.github.normalize import normalize_webhook
 from larkbot.router import Router
 from larkbot.service import NotificationService
+from larkbot.util import to_iso, utcnow
 from tests.conftest import RecordingFeishu
 
 
@@ -23,6 +27,73 @@ async def test_delivers_to_matching_chat(config, store, feishu):
     assert outcome.delivered == ["dev"]
     assert feishu.chats() == ["dev"]
     assert outcome.failed == []
+
+
+class SlowFeishu(RecordingFeishu):
+    """在发送中间让出控制权，制造并发窗口（真实场景里两个 webhook 相差 11ms 到达）。"""
+
+    async def send_card(self, chat, card):
+        await asyncio.sleep(0.01)
+        return await super().send_card(chat, card)
+
+
+async def test_concurrent_dispatch_sends_only_once(config, store):
+    """回归保护：同一次 GitHub 事件被两个 webhook 同时投递（或 webhook 与轮询撞车）时，
+
+    只能发一条消息。修之前去重是「先查 → 再发 → 再写记录」，两个请求会在对方写记录前
+    双双通过检查，用户看到重复消息（实测日志里相差 11ms）。
+    """
+    feishu = SlowFeishu()
+    service = NotificationService(config, store, feishu, Router(config))
+    first = normalize_webhook("push", push_payload(repo="acme/api"), source="webhook")
+    second = normalize_webhook("push", push_payload(repo="acme/api"), source="webhook")
+    assert first is not None and second is not None
+    assert first.dedup_key == second.dedup_key
+
+    results = await asyncio.gather(service.dispatch(first), service.dispatch(second))
+
+    assert feishu.chats() == ["dev"]  # 只发了一次
+    assert sum(len(r.delivered) for r in results) == 1
+    assert sum(len(r.skipped) for r in results) == 1
+
+
+async def test_dedup_relies_on_atomic_claim_not_the_fast_path_read(config, store, monkeypatch):
+    """把快速路径的读直接置空（模拟并发窗口），仍然只能发一次 —— 证明防线在 claim 上。"""
+    feishu = SlowFeishu()
+    service = NotificationService(config, store, feishu, Router(config))
+
+    async def always_empty(dedup_key: str) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(store, "delivered_chats", always_empty)
+
+    event = normalize_webhook("push", push_payload(repo="acme/api"), source="webhook")
+    assert event is not None
+    await asyncio.gather(service.dispatch(event), service.dispatch(event))
+    assert feishu.chats() == ["dev"]
+
+
+async def test_pending_claim_blocks_concurrent_sender(config, store, feishu):
+    """正在发送中的 pending 不能被另一个请求抢占。"""
+    event = normalize_webhook("push", push_payload(repo="acme/api"))
+    assert event is not None
+    assert await store.claim_delivery(event, "dev") is True
+    assert await store.claim_delivery(event, "dev") is False
+
+
+async def test_stale_pending_can_be_reclaimed(config, store, feishu):
+    """进程在投递中途被杀会留下 pending；超过 TTL 后应允许被重新抢占（否则这条永久卡死）。"""
+    from larkbot.store import PENDING_CLAIM_TTL_SECONDS
+
+    event = normalize_webhook("push", push_payload(repo="acme/api"))
+    assert event is not None
+    assert await store.claim_delivery(event, "dev") is True
+    await store.connection.execute(
+        "UPDATE deliveries SET updated_at=? WHERE dedup_key=? AND chat='dev'",
+        (to_iso(utcnow() - timedelta(seconds=PENDING_CLAIM_TTL_SECONDS + 60)), event.dedup_key),
+    )
+    await store.connection.commit()
+    assert await store.claim_delivery(event, "dev") is True
 
 
 async def test_duplicate_from_poll_is_skipped(config, store, feishu):

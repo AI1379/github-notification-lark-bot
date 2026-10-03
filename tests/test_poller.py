@@ -313,6 +313,40 @@ async def test_genuinely_new_repo_still_only_baselines(store):
     assert feishu.sent == []
 
 
+@respx.mock
+async def test_fallback_poll_baseline_skips_backfill(store):
+    """fallback_poll=baseline：回退接管时不补历史（宁可漏推，不刷屏），但要落下游标。"""
+    config = make_config(github={"poll_mode": "always", "fallback_poll": "baseline"})
+    feishu = RecordingFeishu()
+    poller, github = await _build(config, store, feishu)
+    await store.remember_repo("acme/api", "webhook")
+    await _backdate_webhook_seen(store, "acme/api", 18)
+    try:
+        respx.get(EVENTS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=[api_push_event(head="z1", created_at=to_iso(utcnow() - timedelta(minutes=10)))],
+            )
+        )
+        report = await poller.poll_repo("acme/api")
+
+        assert report.status == "baseline"
+        assert report.delivered == 0
+        assert feishu.sent == []
+        state = await store.poll_state("acme/api")
+        # 游标必须落上，否则下一轮又会被当成「首次」重新走一遍 baseline
+        assert state is not None and state["cursor"] is not None
+
+        # 第二轮：已经有游标了，正常增量处理
+        respx.get(EVENTS_URL).mock(
+            return_value=httpx.Response(200, json=[api_push_event(head="z2", created_at=to_iso(utcnow()))])
+        )
+        second = await poller.poll_repo("acme/api")
+        assert second.delivered == 1
+    finally:
+        await github.aclose()
+
+
 async def test_target_repos_filters_unwatched(store):
     config = make_config()
     feishu = RecordingFeishu()

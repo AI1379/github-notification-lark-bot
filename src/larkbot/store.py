@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path("data/larkbot.db")
 
+#: ``pending`` 超过这个秒数就当成「被中断的投递」（进程重启 / 超时），允许被重新抢占
+PENDING_CLAIM_TTL_SECONDS = 120
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
     dedup_key       TEXT NOT NULL,
@@ -152,44 +155,73 @@ class StateStore:
         rows = await self._read("SELECT chat FROM deliveries WHERE dedup_key = ? AND status = 'ok'", (dedup_key,))
         return {row["chat"] for row in rows}
 
-    async def record_delivery(
-        self,
-        event: RepoEvent,
-        chat: str,
-        *,
-        status: str,
-        error: str | None = None,
-        store_payload: bool = False,
-    ) -> None:
+    async def claim_delivery(self, event: RepoEvent, chat: str) -> bool:
+        """原子抢占一条 ``(事件, 群)`` 的投递权；返回 True = 归本次发。
+
+        为什么不是「先查有没有投递过 → 再发 → 再写记录」：那样两个**并发**请求（比如同一次
+        GitHub 事件被组织级和仓库级两个 webhook 同时投递，实测相差 11ms）会在对方写记录
+        之前同时通过检查，各发一次——用户看到重复消息。
+
+        这里用**单条 SQL** 完成「不存在则插入 / 存在但未成功则抢占」，检查与写入之间没有空隙，
+        原子性由数据库保证。
+
+        允许抢占：无记录、``failed``（上次失败，重试机制走这条）、过期的 ``pending``。
+        不允许抢占：``ok``（已成功）、新鲜的 ``pending``（有别的请求正在发）。
+        """
         now = to_iso(utcnow())
-        payload = json.dumps(event.to_snapshot(), ensure_ascii=False) if store_payload else None
+        stale_before = to_iso(utcnow() - timedelta(seconds=PENDING_CLAIM_TTL_SECONDS))
+        payload = json.dumps(event.to_snapshot(), ensure_ascii=False)
+        async with self._lock:
+            cursor = await self.connection.execute(
+                """
+                INSERT INTO deliveries
+                    (dedup_key, chat, repo, kind, source, status, error, payload,
+                     attempts, first_failed_at, occurred_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, 1, NULL, ?, ?)
+                ON CONFLICT(dedup_key, chat) DO UPDATE SET
+                    status = 'pending',
+                    attempts = deliveries.attempts + 1,
+                    updated_at = excluded.updated_at,
+                    payload = COALESCE(excluded.payload, deliveries.payload)
+                WHERE deliveries.status != 'ok'
+                  AND (deliveries.status != 'pending' OR deliveries.updated_at < ?)
+                """,
+                (
+                    event.dedup_key,
+                    chat,
+                    event.repo,
+                    event.kind,
+                    event.source,
+                    payload,
+                    to_iso(event.occurred_at),
+                    now,
+                    stale_before,
+                ),
+            )
+            claimed = bool(cursor.rowcount)
+            await cursor.close()
+            await self.connection.commit()
+        return claimed
+
+    async def finish_delivery(self, event: RepoEvent, chat: str, *, status: str, error: str | None = None) -> None:
+        """收尾：把 ``pending`` 改成 ``ok`` 或 ``failed``。
+
+        - ``ok``：清掉重试快照（不再需要），并让后续并发请求无法再抢占
+        - ``failed``：保留快照并记下首次失败时间，供调度器的重试扫描使用
+        """
+        now = to_iso(utcnow())
+        if status == "ok":
+            await self._write(
+                "UPDATE deliveries SET status='ok', error=NULL, payload=NULL, updated_at=?"
+                " WHERE dedup_key=? AND chat=?",
+                (now, event.dedup_key, chat),
+            )
+            return
         await self._write(
-            """
-            INSERT INTO deliveries
-                (dedup_key, chat, repo, kind, source, status, error, payload,
-                 attempts, first_failed_at, occurred_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-            ON CONFLICT(dedup_key, chat) DO UPDATE SET
-                status = excluded.status,
-                error = excluded.error,
-                payload = COALESCE(excluded.payload, deliveries.payload),
-                attempts = deliveries.attempts + 1,
-                first_failed_at = COALESCE(deliveries.first_failed_at, excluded.first_failed_at),
-                updated_at = excluded.updated_at
-            """,
-            (
-                event.dedup_key,
-                chat,
-                event.repo,
-                event.kind,
-                event.source,
-                status,
-                error,
-                payload,
-                now if status == "failed" else None,
-                to_iso(event.occurred_at),
-                now,
-            ),
+            "UPDATE deliveries SET status='failed', error=?,"
+            " first_failed_at=COALESCE(first_failed_at, ?), updated_at=?"
+            " WHERE dedup_key=? AND chat=?",
+            (error, now, now, event.dedup_key, chat),
         )
 
     async def pending_retries(self, *, limit: int = 20, max_age_minutes: int = 60) -> list[dict[str, Any]]:

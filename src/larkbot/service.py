@@ -134,12 +134,14 @@ class NotificationService:
             return outcome
 
         await self.store.remember_repo(event.repo, event.source)
+        # 快速路径：先把已成功的排掉，省掉一次写；但它只是优化，
+        # 真正决定「该不该发」的是下面 claim_delivery 的原子抢占。
         already = await self.store.delivered_chats(event.dedup_key)
         card: dict[str, Any] | None = None
 
         for chat in targets:
-            if chat.name in already:
-                logger.debug("事件已投递过，跳过: %s -> %s", event.dedup_key, chat.name)
+            if chat.name in already or not await self.store.claim_delivery(event, chat.name):
+                logger.debug("事件已投递或在投递中，跳过: %s -> %s", event.dedup_key, chat.name)
                 outcome.results.append(ChatOutcome(chat.name, "skipped_duplicate"))
                 self.stats.skipped_duplicate += 1
                 continue
@@ -149,16 +151,16 @@ class NotificationService:
                 await self.feishu.send_card(chat, card)
             except FeishuError as exc:
                 logger.warning("推送到 %s 失败: %s", chat.name, exc)
-                await self.store.record_delivery(event, chat.name, status="failed", error=str(exc), store_payload=True)
+                await self.store.finish_delivery(event, chat.name, status="failed", error=str(exc))
                 outcome.results.append(ChatOutcome(chat.name, "failed", truncate(str(exc), 200)))
                 self.stats.failed += 1
             except Exception as exc:  # 兜底，避免单群异常拖垮整批
                 logger.exception("推送到 %s 出现未预期错误", chat.name)
-                await self.store.record_delivery(event, chat.name, status="failed", error=str(exc), store_payload=True)
+                await self.store.finish_delivery(event, chat.name, status="failed", error=str(exc))
                 outcome.results.append(ChatOutcome(chat.name, "failed", truncate(str(exc), 200)))
                 self.stats.failed += 1
             else:
-                await self.store.record_delivery(event, chat.name, status="ok")
+                await self.store.finish_delivery(event, chat.name, status="ok")
                 outcome.results.append(ChatOutcome(chat.name, "delivered"))
                 self.stats.delivered += 1
                 logger.info("已推送 %s -> %s", event.to_log(), chat.name)

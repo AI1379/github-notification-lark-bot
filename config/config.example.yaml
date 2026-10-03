@@ -38,7 +38,10 @@ github:
   # 首次看到某仓库时：baseline = 只记录游标、不补推历史；backlog = 补推最近 1 小时
   first_poll: baseline
   first_poll_lookback_seconds: 3600
-  # webhook 断链后轮询接管时，最多向前补多久的漏掉事件（太长了会一次刷屏）
+  # webhook 断链后轮询接管时怎么处理断链期间的事件：
+  #   backfill = 补推（靠去重排除已送达的，宁可补多不少；断链久了可能一次推很多）
+  #   baseline = 只从此刻起，不补历史（宁可漏推，绝不刷屏）
+  fallback_poll: backfill
   fallback_lookback_seconds: 21600
   # 额外要轮询的仓库（没配 webhook、也没有具体订阅条目时使用）
   poll_repos: []
