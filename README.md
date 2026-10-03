@@ -86,6 +86,10 @@ uv run larkbot send-test dev-frontend   # 确认这个群真的能收到
 uv run larkbot serve
 ```
 
+`larkbot` **会自己加载当前目录的 `.env`**（解析交给 python-dotenv，已存在的环境变量优先），
+所以手动跑 CLI 和用 systemd 跑都不会出现“明明填了却报未配置”的情况。
+`.env` 不在当前目录时用 `LARKBOT_ENV_FILE=/path/to/.env` 指定。
+
 ### 2.2 第 1 步：GitHub 侧 —— 让 larkbot 看得到仓库
 
 两张「门票」，可以只用其一，也可以都开（**推荐都开**，互为备胎）：

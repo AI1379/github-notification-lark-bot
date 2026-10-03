@@ -9,10 +9,15 @@ import re
 import sys
 import unicodedata
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from dotenv import dotenv_values, load_dotenv
+
 _GLOB_CACHE: dict[str, re.Pattern[str]] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -85,6 +90,31 @@ def to_iso(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def load_env_file(path: str | Path | None = None, *, override: bool = False) -> dict[str, str]:
+    """加载 ``.env`` 到 ``os.environ``，返回实际读到的键值对（解析交给 python-dotenv）。
+
+    为什么程序自己要读它：systemd 的 ``EnvironmentFile`` 只在服务里生效，直接跑 CLI
+    （``uv run larkbot chats``）时没人加载它，会莫名其妙地报“未配置凭证”。
+
+    - 默认读当前目录的 ``.env``，可用 ``LARKBOT_ENV_FILE`` 指定其它路径
+    - **已存在的环境变量优先**（systemd / 手动 export 的值不会被文件覆盖）
+    - ``interpolate=False``：不把 ``${VAR}`` 当变量展开。我们的 .env 里存的是密钥，
+      万一含 ``$`` 被当成引用展开就静默损坏了；引用变量请用 config 里的 ``env:`` 语法
+    """
+    resolved = Path(path or os.environ.get("LARKBOT_ENV_FILE") or ".env")
+    if not resolved.is_file():
+        return {}
+    try:
+        loaded = dotenv_values(resolved, encoding="utf-8", interpolate=False)
+        load_dotenv(resolved, encoding="utf-8", override=override, interpolate=False)
+    except OSError as exc:  # 权限/编码问题不应该把整个命令弄挂
+        logger.debug("读取 %s 失败: %s", resolved, exc)
+        return {}
+    if loaded:
+        logger.debug("已加载 %s（%d 个变量）", resolved, len(loaded))
+    return {key: value for key, value in loaded.items() if value is not None}
 
 
 def as_dict(value: Any) -> dict[str, Any]:

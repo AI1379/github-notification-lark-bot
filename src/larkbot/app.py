@@ -30,7 +30,7 @@ from .feishu.events import (
 from .github.normalize import normalize_webhook
 from .github.webhook import verify_signature
 from .runtime import BotRuntime
-from .util import setup_logging, utcnow
+from .util import load_env_file, setup_logging, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,8 @@ def create_app(
     start_poller: bool | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
+    # 服务自己也要读 .env：不依赖部署方式（systemd 的 EnvironmentFile 只是其中一种）
+    load_env_file()
     setup_logging()
 
     @asynccontextmanager

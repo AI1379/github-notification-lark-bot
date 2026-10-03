@@ -30,7 +30,7 @@ from .fixtures import SCENARIOS
 from .fixtures import build as build_fixture
 from .github.normalize import normalize_webhook
 from .runtime import BotRuntime, verify_app_chats
-from .util import setup_logging
+from .util import load_env_file, setup_logging
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,8 +147,8 @@ async def _chats(args: argparse.Namespace) -> int:
     config = load_config(args.config, lenient=True)
     if not (config.feishu.app_id and config.feishu.app_secret):
         print(
-            "需要自建应用凭证才能列出群：请在 .env 里填 FEISHU_APP_ID / FEISHU_APP_SECRET，"
-            "并确认 config 里用 env: 引用了它们。",
+            "需要自建应用凭证才能列出群：请在 .env 里填 FEISHU_APP_ID / FEISHU_APP_SECRET"
+            "（larkbot 会自动加载当前目录的 .env，也可用 LARKBOT_ENV_FILE 指定）。",
             file=sys.stderr,
         )
         return 2
@@ -238,7 +238,10 @@ async def _slash(args: argparse.Namespace) -> int:
 
     config = load_config(args.config, lenient=True)
     if not (config.feishu.app_id and config.feishu.app_secret):
-        print("需要自建应用凭证：请在 .env 里填 FEISHU_APP_ID / FEISHU_APP_SECRET。", file=sys.stderr)
+        print(
+            "需要自建应用凭证：请在 .env 里填 FEISHU_APP_ID / FEISHU_APP_SECRET（larkbot 会自动加载当前目录的 .env）。",
+            file=sys.stderr,
+        )
         return 2
 
     async with FeishuClient(config.feishu) as feishu:
@@ -466,6 +469,9 @@ async def _simulate(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # 先加载 .env：手动跑 CLI 时没有 systemd 的 EnvironmentFile，
+    # config 里的 env: 引用必须能在这里解析到，否则会报“未配置凭证”
+    load_env_file()
     setup_logging(args.log_level)
     try:
         if args.command == "serve":
